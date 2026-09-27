@@ -1,0 +1,5 @@
+LeadPilot is a fictional office-furniture supplier used for this portfolio project.
+
+The company serves business customers in India and can prepare quotations for bulk orders.
+
+Customers should not be promised stock or delivery until the relevant tool has checked availability.
