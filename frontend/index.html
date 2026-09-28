@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LeadPilot - AI Sales Assistant</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div class="chat-container">
+
+        <header>
+            <h1>LeadPilot</h1>
+            <p>AI Sales Assistant</p>
+        </header>
+
+        <div id="chat-box" class="chat-box">
+            <div class="message bot">
+                Hello! 👋 I'm LeadPilot. What product are you looking for today?
+            </div>
+        </div>
+
+        <div class="input-area">
+            <input
+                type="text"
+                id="message-input"
+                placeholder="Type your message..."
+            />
+
+            <button onclick="sendMessage()">Send</button>
+        </div>
+
+    </div>
+
+    <script src="script.js"></script>
+
+</body>
+</html>
