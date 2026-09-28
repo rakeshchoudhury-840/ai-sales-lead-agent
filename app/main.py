@@ -11,8 +11,11 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Allow the frontend to communicate with the FastAPI backend.
-# This is useful while developing locally.
+
+# --------------------------------------------------
+# CORS
+# --------------------------------------------------
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,16 +25,32 @@ app.add_middleware(
 )
 
 
+# --------------------------------------------------
+# Agent
+# --------------------------------------------------
+
 agent = SalesAgent()
 
-# Stores conversation history for each session.
+
+# --------------------------------------------------
+# Conversation memory
+# --------------------------------------------------
+
 sessions: dict[str, list[dict]] = {}
 
+
+# --------------------------------------------------
+# Startup
+# --------------------------------------------------
 
 @app.on_event("startup")
 def startup():
     init_db()
 
+
+# --------------------------------------------------
+# Home
+# --------------------------------------------------
 
 @app.get("/")
 def home():
@@ -41,18 +60,27 @@ def home():
     }
 
 
+# --------------------------------------------------
+# Chat
+# --------------------------------------------------
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
-    # Get existing conversation history or create a new one.
-    history = sessions.setdefault(request.session_id, [])
 
-    # Send the customer's message to the sales agent.
-    response = agent.respond(
+    # Get existing conversation history
+    # or create a new session.
+    history = sessions.setdefault(
+        request.session_id,
+        [],
+    )
+
+    # Send the customer message to the AI agent.
+    response, lead = agent.respond(
         request.message,
         history,
     )
 
-    # Save the conversation.
+    # Save customer message.
     history.append(
         {
             "role": "user",
@@ -60,6 +88,7 @@ def chat(request: ChatRequest):
         }
     )
 
+    # Save AI response.
     history.append(
         {
             "role": "assistant",
@@ -67,8 +96,9 @@ def chat(request: ChatRequest):
         }
     )
 
-    # Return the response to the frontend.
+    # Return response + created lead.
     return ChatResponse(
         session_id=request.session_id,
         response=response,
+        lead=lead,
     )

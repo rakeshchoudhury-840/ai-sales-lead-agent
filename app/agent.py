@@ -1,108 +1,390 @@
 import json
 
-from openai import OpenAI
+from ollama import chat
 
-from app.config import DEMO_MODE, OPENAI_API_KEY, OPENAI_MODEL
 from app.rag.knowledge import retrieve_knowledge
 from app.tools import OPENAI_TOOLS, execute_tool
 
 
-SYSTEM_PROMPT = """
-You are LeadPilot, an AI sales representative for a fictional Indian office-furniture SME.
+OLLAMA_MODEL = "qwen2.5:7b"
 
-Goals:
-- Have a natural, helpful sales conversation.
-- Understand product, quantity, budget, location, and timeline.
-- Ask concise follow-up questions when important information is missing.
-- Use product tools before claiming a price or stock level.
-- Never invent stock, prices, discounts, or policies.
-- Recommend products only from tool results.
-- Help move a qualified customer toward a quotation.
-- State that quotations are estimates until confirmed by a human salesperson.
+
+SYSTEM_PROMPT = """
+You are LeadPilot, an AI sales assistant for a business.
+
+Your job is to have natural, helpful, human-like sales conversations.
+
+You are NOT a form-filling bot.
+You are NOT a keyword-matching chatbot.
+
+Understand the customer's meaning and conversation context.
+
+IMPORTANT TOOL RULES:
+
+Use business tools whenever the answer requires real business information.
+
+Available tools include:
+- product search
+- stock checking
+- price checking
+- quotation calculation
+- lead qualification
+- lead creation
+- follow-up generation
+
+Never invent:
+- prices
+- stock
+- quotations
+- lead information
+- order confirmations
+
+Creating a sales lead is NOT the same as placing an order.
+
+Never tell the customer that an order has been placed unless an actual
+order tool confirms it.
+
+CONVERSATION:
+
+- Remember previous messages.
+- Do not ask for information already provided.
+- Ask follow-up questions only when necessary.
+- Respond naturally to casual language.
+- When enough information is available, use the appropriate tools.
+- Keep responses concise and conversational.
+
+LEAD INFORMATION:
+
+Try to collect:
+- product
+- quantity
+- budget per unit
+- location
+- urgency
+
+When the customer has confirmed their requirement:
+- qualify the lead
+- create the sales lead
+- do not claim that an order was placed.
+
+You are a helpful sales representative.
 """
 
 
-class SalesAgent:
-    def __init__(self):
-        self.client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+def is_lead_creation_requested(message: str) -> bool:
+    """
+    This is NOT used to understand the customer's conversation.
 
-    def respond(self, message: str, history: list[dict]) -> str:
-        if DEMO_MODE or not self.client:
-            return self.demo_response(message)
+    It is only a safety gate for a database write.
+    We require the customer to explicitly indicate that they want
+    the sales lead created.
+    """
+
+    text = message.lower().strip()
+
+    confirmation_phrases = [
+        "create the sales lead",
+        "create sales lead",
+        "create the lead",
+        "create a lead",
+        "save the lead",
+        "save this lead",
+        "save my lead",
+        "please create the lead",
+        "please create the sales lead",
+        "yes create the lead",
+        "yes, create the lead",
+        "yes create the sales lead",
+        "yes, create the sales lead",
+    ]
+
+    return any(
+        phrase in text
+        for phrase in confirmation_phrases
+    )
+
+
+class SalesAgent:
+
+    def __init__(self):
+        print(
+            f"LeadPilot using local Ollama model: {OLLAMA_MODEL}"
+        )
+
+    def respond(
+        self,
+        message: str,
+        history: list[dict],
+    ) -> tuple[str, dict | None]:
 
         knowledge = retrieve_knowledge(message)
 
-        input_items = history + [{"role": "user", "content": message}]
+        messages = [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT,
+            }
+        ]
 
-        if knowledge:
-            input_items.insert(
-                0,
-                {
-                    "role": "developer",
-                    "content": "Relevant company knowledge:\n"
-                    + "\n\n".join(knowledge),
-                },
-            )
+        # Previous conversation
+        for item in history:
 
-        response = self.client.responses.create(
-            model=OPENAI_MODEL,
-            instructions=SYSTEM_PROMPT,
-            input=input_items,
-            tools=OPENAI_TOOLS,
-        )
+            if item.get("role") in ["user", "assistant"]:
 
-        tool_outputs = []
-
-        for item in response.output:
-            if item.type == "function_call":
-                args = json.loads(item.arguments)
-                result = execute_tool(item.name, args)
-
-                tool_outputs.append(
+                messages.append(
                     {
-                        "type": "function_call_output",
-                        "call_id": item.call_id,
-                        "output": json.dumps(result),
+                        "role": item["role"],
+                        "content": item["content"],
                     }
                 )
 
-        if tool_outputs:
-            follow_up = self.client.responses.create(
-                model=OPENAI_MODEL,
-                instructions=SYSTEM_PROMPT,
-                previous_response_id=response.id,
-                input=tool_outputs,
+        # Current message
+        messages.append(
+            {
+                "role": "user",
+                "content": message,
+            }
+        )
+
+        # RAG knowledge
+        if knowledge:
+
+            knowledge_text = "\n\n".join(
+                str(item)
+                for item in knowledge
+            )
+
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Relevant LeadPilot business knowledge:\n\n"
+                        + knowledge_text
+                    ),
+                }
+            )
+
+        created_lead = None
+        qualification_result = None
+
+        # -----------------------------------------
+        # AI + tool calling
+        # -----------------------------------------
+
+        for _ in range(5):
+
+            response = chat(
+                model=OLLAMA_MODEL,
+                messages=messages,
                 tools=OPENAI_TOOLS,
             )
 
-            return follow_up.output_text
+            assistant_message = response.message
 
-        return response.output_text
+            # -------------------------------------
+            # No tool call
+            # -------------------------------------
 
-    def demo_response(self, message: str) -> str:
-        message_lower = message.lower()
+            if not assistant_message.tool_calls:
 
-        if "chair" in message_lower:
-            return (
-                "Sure! We can help with office chairs. "
-                "Could you tell me the quantity you need, "
-                "your delivery location, and your approximate budget per chair?"
-            )
+                return (
+                    assistant_message.content.strip(),
+                    created_lead,
+                )
 
-        if "price" in message_lower or "cost" in message_lower:
-            return (
-                "I can help you check pricing. "
-                "Please tell me which product you are interested in and the quantity."
-            )
+            # Add assistant tool call
+            messages.append(assistant_message)
 
-        if "hello" in message_lower or "hi" in message_lower:
-            return (
-                "Hello! 👋 I'm LeadPilot, your AI sales assistant. "
-                "What product are you looking for today?"
-            )
+            # -------------------------------------
+            # Execute tools
+            # -------------------------------------
+
+            for tool_call in assistant_message.tool_calls:
+
+                tool_name = tool_call.function.name
+                arguments = tool_call.function.arguments
+
+                print(
+                    f"LeadPilot tool call: "
+                    f"{tool_name}({arguments})"
+                )
+
+                try:
+
+                    result = execute_tool(
+                        tool_name,
+                        arguments,
+                    )
+
+                    # Convert Pydantic objects
+                    if hasattr(result, "model_dump"):
+
+                        result = result.model_dump()
+
+                    elif hasattr(result, "dict"):
+
+                        result = result.dict()
+
+                    # ---------------------------------
+                    # Remember qualification result
+                    # ---------------------------------
+
+                    if tool_name == "qualify_lead":
+
+                        qualification_result = result
+
+                    # ---------------------------------
+                    # Remember created lead
+                    # ---------------------------------
+
+                    if tool_name == "create_lead":
+
+                        if isinstance(result, dict):
+
+                            created_lead = result.get(
+                                "lead",
+                                result,
+                            )
+
+                except Exception as error:
+
+                    result = {
+                        "error": str(error)
+                    }
+
+                    print(
+                        f"LeadPilot tool error: "
+                        f"{tool_name} -> {error}"
+                    )
+
+                # Send tool result back to Qwen
+                messages.append(
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            result,
+                            default=str,
+                        ),
+                    }
+                )
+
+            # -----------------------------------------
+            # IMPORTANT:
+            #
+            # If qualification succeeded and the
+            # customer explicitly requested lead
+            # creation, don't depend on Qwen to make
+            # another tool call.
+            # -----------------------------------------
+
+            if (
+                qualification_result
+                and created_lead is None
+                and is_lead_creation_requested(message)
+            ):
+
+                try:
+
+                    lead_data = qualification_result
+
+                    create_arguments = {
+                        "product": lead_data.get(
+                            "product",
+                            arguments.get("product"),
+                        ),
+                        "quantity": lead_data.get(
+                            "quantity",
+                            arguments.get("quantity"),
+                        ),
+                        "budget_per_unit": lead_data.get(
+                            "budget_per_unit",
+                            arguments.get("budget_per_unit"),
+                        ),
+                        "location": lead_data.get(
+                            "location",
+                            arguments.get("location"),
+                        ),
+                        "urgency": lead_data.get(
+                            "urgency",
+                            arguments.get("urgency"),
+                        ),
+                        "lead_score": lead_data.get(
+                            "lead_score",
+                            0,
+                        ),
+                        "status": lead_data.get(
+                            "status",
+                            "New",
+                        ),
+                    }
+
+                    print(
+                        "LeadPilot automatic tool call: "
+                        f"create_lead({create_arguments})"
+                    )
+
+                    result = execute_tool(
+                        "create_lead",
+                        create_arguments,
+                    )
+
+                    if hasattr(result, "model_dump"):
+
+                        result = result.model_dump()
+
+                    elif hasattr(result, "dict"):
+
+                        result = result.dict()
+
+                    if isinstance(result, dict):
+
+                        created_lead = result.get(
+                            "lead",
+                            result,
+                        )
+
+                    # Tell Qwen that the lead was created.
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "content": json.dumps(
+                                {
+                                    "status": "created",
+                                    "lead": created_lead,
+                                },
+                                default=str,
+                            ),
+                        }
+                    )
+
+                    # Ask Qwen for the final customer response.
+                    final_response = chat(
+                        model=OLLAMA_MODEL,
+                        messages=messages,
+                    )
+
+                    final_text = (
+                        final_response.message.content.strip()
+                    )
+
+                    return (
+                        final_text,
+                        created_lead,
+                    )
+
+                except Exception as error:
+
+                    print(
+                        "LeadPilot automatic lead creation error: "
+                        f"{error}"
+                    )
+
+        # -----------------------------------------
+        # Safety fallback
+        # -----------------------------------------
 
         return (
-            "I'd be happy to help with your purchase. "
-            "Please tell me the product, quantity, delivery location, "
-            "and approximate budget."
+            "I'm sorry, I wasn't able to complete "
+            "that request. Could you please try again?",
+            created_lead,
         )
